@@ -19,7 +19,6 @@
 
         .mono { font-family: 'JetBrains Mono', monospace; }
 
-        /* Snappy Sharp UI */
         .sharp-card { 
             background: #0a0a0a; 
             border: 1px solid #222; 
@@ -55,11 +54,6 @@
             box-shadow: 0 4px 0 #6b21a8;
         }
 
-        .btn-sharp:active {
-            transform: translateY(0);
-            box-shadow: 0 0 0 transparent;
-        }
-
         .video-container { 
             position: relative; 
             padding-bottom: 56.25%; 
@@ -89,12 +83,14 @@
             justify-content: center;
             align-items: center;
             z-index: 50;
-            pointer-events: none; 
             transition: opacity 0.3s ease;
+            pointer-events: auto; /* Blocks iframe initially */
         }
         
-        #countdownOverlay.active { opacity: 1; pointer-events: auto; }
-        #countdownOverlay.hidden-custom { opacity: 0; }
+        #countdownOverlay.finished { 
+            opacity: 0; 
+            pointer-events: none; /* Allows clicking iframe after countdown */
+        }
 
         .count-number {
             font-size: 8rem;
@@ -108,7 +104,6 @@
             border-left: 4px solid #a855f7 !important;
         }
 
-        /* Table styling */
         th {
             text-transform: uppercase;
             letter-spacing: 0.1em;
@@ -151,7 +146,7 @@
                 </div>
                 
                 <div class="video-container relative" id="videoWrapper">
-                    <div id="countdownOverlay" class="hidden-custom">
+                    <div id="countdownOverlay" class="hidden">
                         <div id="countDisplay" class="count-number">3</div>
                     </div>
                     <div id="karaokePlayer"></div>
@@ -226,7 +221,8 @@
 
             try {
                 const query = `${userInput} karaoke`;
-                const ytSearchUrl = `https://www.googleapis.com/youtube/v3/search?part=id,snippet&q=${encodeURIComponent(query)}&type=video&maxResults=30&key=${apiKey}`;
+                // Added videoEmbeddable=true to initial search
+                const ytSearchUrl = `https://www.googleapis.com/youtube/v3/search?part=id,snippet&q=${encodeURIComponent(query)}&type=video&videoEmbeddable=true&maxResults=30&key=${apiKey}`;
                 const searchData = await fetchWithRetry(ytSearchUrl);
                 
                 if (!searchData.items || searchData.items.length === 0) {
@@ -236,13 +232,18 @@
                 }
 
                 const videoIds = searchData.items.map(item => item.id.videoId).join(',');
-                const statsUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${videoIds}&key=${apiKey}`;
+                // Explicitly requesting "status" to check for embed permissions
+                const statsUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet,status&id=${videoIds}&key=${apiKey}`;
                 const statsData = await fetchWithRetry(statsUrl);
 
                 const inputTokens = userInput.toLowerCase().split(/\s+/).filter(t => t.length > 1);
                 const normalizedInput = normalize(userInput);
 
                 let results = statsData.items.map(item => {
+                    const status = item.status;
+                    // Filter out videos that explicitly disable external playback
+                    if (status.embeddable === false || status.uploadStatus !== 'processed') return null;
+
                     const rawTitle = item.snippet.title;
                     const titleLower = rawTitle.toLowerCase();
                     const channel = item.snippet.channelTitle.toLowerCase();
@@ -260,14 +261,8 @@
                     const titleWithoutNoise = titleLower.replace('karaoke', '').replace('version', '').replace(/[^a-z0-9]/g, '').trim();
                     const inputWithoutNoise = userInput.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
                     
-                    const lengthDiff = Math.abs(titleWithoutNoise.length - inputWithoutNoise.length);
-                    if (lengthDiff < 5) score *= 500;
-
+                    if (Math.abs(titleWithoutNoise.length - inputWithoutNoise.length) < 5) score *= 500;
                     if (normalizedTitle.includes(normalizedInput)) score *= 150;
-
-                    const publishedDate = new Date(item.snippet.publishedAt);
-                    const ageDays = (new Date() - publishedDate) / (1000 * 60 * 60 * 24);
-                    if (ageDays < 365) score *= 4; 
 
                     if (channel.includes('topic') || titleLower.includes('official video') || titleLower.includes('live')) score *= 0.0001;
                     if (!titleLower.includes('karaoke') && !titleLower.includes('instrumental')) score *= 0.05;
@@ -282,7 +277,7 @@
                         isGold: isGold
                     };
                 })
-                .filter(i => i.score > 0 && i.coverage >= 50)
+                .filter(i => i !== null && i.score > 0 && i.coverage >= 50)
                 .sort((a, b) => b.score - a.score);
 
                 renderResults(results);
@@ -330,10 +325,10 @@
         function initVideoPlayer(id) {
             document.getElementById('playerSection').classList.remove('hidden');
             window.scrollTo({ top: 0, behavior: 'smooth' });
+            
             const overlay = document.getElementById('countdownOverlay');
-            overlay.classList.remove('hidden-custom');
-            overlay.classList.add('active');
-
+            overlay.classList.remove('hidden', 'finished');
+            
             if (ytPlayer?.loadVideoById) {
                 ytPlayer.loadVideoById(id);
                 ytPlayer.pauseVideo();
@@ -342,7 +337,16 @@
                 ytPlayer = new YT.Player('karaokePlayer', {
                     height: '100%', width: '100%', videoId: id,
                     playerVars: { 'autoplay': 0, 'modestbranding': 1, 'controls': 1 },
-                    events: { 'onReady': startCountdown }
+                    events: { 
+                        'onReady': startCountdown,
+                        'onError': (e) => {
+                            if (e.data === 101 || e.data === 150) {
+                                document.getElementById('statusMessage').classList.remove('hidden');
+                                document.getElementById('statusMessage').innerHTML = "<span class='text-red-500'>RESTRICTED TRACK: PLEASE SELECT ANOTHER VERSION.</span>";
+                                closePlayer();
+                            }
+                        }
+                    }
                 });
             }
         }
@@ -352,16 +356,19 @@
             const display = document.getElementById('countDisplay');
             display.innerText = count;
             if (countdownTimer) clearInterval(countdownTimer);
+            
             countdownTimer = setInterval(() => {
                 count--;
-                if (count > 0) display.innerText = count;
-                else if (count === 0) {
+                if (count > 0) {
+                    display.innerText = count;
+                } else if (count === 0) {
                     display.innerText = "GO";
                     ytPlayer.playVideo();
                     requestManualFullscreen();
                 } else {
                     clearInterval(countdownTimer);
-                    document.getElementById('countdownOverlay').classList.add('hidden-custom');
+                    // Add finished class to allow clicks through overlay
+                    document.getElementById('countdownOverlay').classList.add('finished');
                 }
             }, 1000);
         }
@@ -369,16 +376,14 @@
         function requestManualFullscreen() {
             const el = document.querySelector('#karaokePlayer iframe');
             if (!el) return;
-            
             if (el.requestFullscreen) el.requestFullscreen();
             else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-            else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
-            else if (el.msRequestFullscreen) el.msRequestFullscreen();
         }
 
         function closePlayer() {
             if (ytPlayer?.stopVideo) ytPlayer.stopVideo();
             document.getElementById('playerSection').classList.add('hidden');
+            document.getElementById('countdownOverlay').classList.add('hidden');
         }
     </script>
 </body>
