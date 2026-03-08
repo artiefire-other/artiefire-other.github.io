@@ -128,7 +128,6 @@
             }
         });
 
-        // Helper to normalize strings (remove spaces, punctuation, lowercase)
         const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
 
         async function fetchWithRetry(url, retries = 5) {
@@ -190,19 +189,30 @@
                     const matchedTokens = inputTokens.filter(t => titleLower.includes(t) || channel.includes(t));
                     const coverage = matchedTokens.length / inputTokens.length;
 
+                    // Base score from raw stats
                     let score = (parseInt(item.statistics.likeCount || 0) * 10) + (parseInt(item.statistics.viewCount || 0) / 1000);
                     
                     const isGold = GOLD_CHANNELS.some(g => channel.includes(g));
                     if (isGold) score *= 1000;
 
                     // 1. EXACT PHRASE MATCH BOOST
-                    // If the user typed "Sunday", we want titles that contain "Sunday" as a whole word.
                     if (titleLower.includes(userInput.toLowerCase())) {
                         score *= 200; 
                     }
 
-                    // 2. DISCREPANCY/FUZZY MATCH BOOST (Missed spaces/typos)
-                    // If the normalized title contains the normalized input (e.g. "SundayCranberries")
+                    // 2. BREVITY BONUS (THE FIX)
+                    // We check the length of the title (excluding "karaoke" and noise).
+                    // If the title is almost the same length as the search query, it's likely an exact match.
+                    const titleWithoutNoise = titleLower.replace('karaoke', '').replace('version', '').replace(/[^a-z0-9]/g, '').trim();
+                    const inputWithoutNoise = userInput.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+                    
+                    // If title and input are nearly identical in length, give a massive boost
+                    const lengthDiff = Math.abs(titleWithoutNoise.length - inputWithoutNoise.length);
+                    if (lengthDiff < 5) {
+                        score *= 500; // Priority to shorter, more accurate titles
+                    }
+
+                    // 3. DISCREPANCY/FUZZY MATCH BOOST
                     if (normalizedTitle.includes(normalizedInput)) {
                         score *= 150;
                     }
