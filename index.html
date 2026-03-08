@@ -39,6 +39,11 @@
             color: #a855f7;
             text-shadow: 0 0 30px rgba(168, 85, 247, 0.5);
         }
+
+        .gold-highlight {
+            background: rgba(168, 85, 247, 0.1);
+            border-left: 4px solid #a855f7 !important;
+        }
     </style>
 </head>
 <body class="min-h-screen p-4 md:p-8">
@@ -113,13 +118,8 @@
         const GOLD_CHANNELS = ['fakeyoke', 'sing king', 'karafun', 'sing2karaoke', 'karaoketv', 'cc karaoke', 'stingray karaoke', 'piano karaoke', 'vocal-star'];
 
         document.addEventListener('keydown', (e) => {
-            // Only trigger shortcut keys if the user is NOT typing in the search box
             if (document.activeElement.id === 'songQuery') return;
-
-            if (e.code === 'KeyF') {
-                e.preventDefault();
-                requestManualFullscreen();
-            }
+            if (e.code === 'KeyF') { e.preventDefault(); requestManualFullscreen(); }
             if (e.code === 'Space') {
                 if (ytPlayer?.getPlayerState) {
                     e.preventDefault();
@@ -127,6 +127,9 @@
                 }
             }
         });
+
+        // Helper to normalize strings (remove spaces, punctuation, lowercase)
+        const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
 
         async function fetchWithRetry(url, retries = 5) {
             for (let i = 0; i < retries; i++) {
@@ -176,46 +179,55 @@
                 const statsData = await fetchWithRetry(statsUrl);
 
                 const inputTokens = userInput.toLowerCase().split(/\s+/).filter(t => t.length > 1);
+                const normalizedInput = normalize(userInput);
 
                 let results = statsData.items.map(item => {
-                    const title = item.snippet.title.toLowerCase();
+                    const rawTitle = item.snippet.title;
+                    const titleLower = rawTitle.toLowerCase();
                     const channel = item.snippet.channelTitle.toLowerCase();
-                    const combined = title + " " + channel;
+                    const normalizedTitle = normalize(rawTitle);
                     
-                    const matchedTokens = inputTokens.filter(t => combined.includes(t));
+                    const matchedTokens = inputTokens.filter(t => titleLower.includes(t) || channel.includes(t));
                     const coverage = matchedTokens.length / inputTokens.length;
 
                     let score = (parseInt(item.statistics.likeCount || 0) * 10) + (parseInt(item.statistics.viewCount || 0) / 1000);
                     
-                    if (GOLD_CHANNELS.some(g => channel.includes(g))) {
-                        score *= 1000;
+                    const isGold = GOLD_CHANNELS.some(g => channel.includes(g));
+                    if (isGold) score *= 1000;
+
+                    // 1. EXACT PHRASE MATCH BOOST
+                    // If the user typed "Sunday", we want titles that contain "Sunday" as a whole word.
+                    if (titleLower.includes(userInput.toLowerCase())) {
+                        score *= 200; 
                     }
 
-                    if (title.includes(userInput.toLowerCase())) {
-                        score *= 100; 
+                    // 2. DISCREPANCY/FUZZY MATCH BOOST (Missed spaces/typos)
+                    // If the normalized title contains the normalized input (e.g. "SundayCranberries")
+                    if (normalizedTitle.includes(normalizedInput)) {
+                        score *= 150;
                     }
 
                     const publishedDate = new Date(item.snippet.publishedAt);
                     const ageDays = (new Date() - publishedDate) / (1000 * 60 * 60 * 24);
                     if (ageDays < 365) score *= 4; 
                     else if (ageDays < 730) score *= 2; 
-                    else if (ageDays > 3650) score *= 0.2; 
 
-                    if (channel.includes('topic') || title.includes('official video') || title.includes('live')) {
+                    if (channel.includes('topic') || titleLower.includes('official video') || titleLower.includes('live')) {
                         score *= 0.0001;
                     }
                     
-                    if (!title.includes('karaoke') && !title.includes('instrumental')) {
+                    if (!titleLower.includes('karaoke') && !titleLower.includes('instrumental')) {
                         score *= 0.05;
                     }
 
                     return {
                         id: item.id,
-                        title: item.snippet.title,
+                        title: rawTitle,
                         channel: item.snippet.channelTitle,
                         score: Math.round(score * coverage),
                         thumbnail: item.snippet.thumbnails.medium.url,
-                        coverage: Math.round(coverage * 100)
+                        coverage: Math.round(coverage * 100),
+                        isGold: isGold
                     };
                 })
                 .filter(i => i.score > 0 && i.coverage >= 50)
@@ -239,13 +251,16 @@
                 return;
             }
             tbody.innerHTML = results.slice(0, 10).map((item, i) => `
-                <tr class="hover:bg-slate-800/30 transition-colors group cursor-pointer" onclick="initVideoPlayer('${item.id}')">
+                <tr class="hover:bg-slate-800/30 transition-colors group cursor-pointer ${item.isGold ? 'gold-highlight' : ''}" onclick="initVideoPlayer('${item.id}')">
                     <td class="p-4 text-slate-500 font-mono text-center">#${i + 1}</td>
                     <td class="p-4">
                         <div class="flex items-center gap-4">
                             <img src="${item.thumbnail}" class="w-16 h-10 rounded border border-slate-700 object-cover">
                             <div>
-                                <div class="font-medium text-slate-200 group-hover:text-purple-400">${item.title}</div>
+                                <div class="font-medium text-slate-200 group-hover:text-purple-400">
+                                    ${item.title}
+                                    ${item.isGold ? '<span class="ml-2 text-[9px] bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded border border-purple-500/30 uppercase tracking-tighter">Top Tier Creator</span>' : ''}
+                                </div>
                                 <div class="text-[10px] uppercase text-slate-500 font-bold mt-1">${item.channel}</div>
                             </div>
                         </div>
